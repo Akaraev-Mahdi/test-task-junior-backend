@@ -36,6 +36,9 @@ func main() {
 	defer pool.Close()
 
 	taskRepo := postgresrepo.New(pool)
+
+	StartRecurrenceWorker(taskRepo)
+
 	taskUsecase := task.NewService(taskRepo)
 	taskHandler := httphandlers.NewTaskHandler(taskUsecase)
 	docsHandler := swaggerdocs.NewHandler()
@@ -90,4 +93,49 @@ func envOrDefault(key, fallback string) string {
 	}
 
 	return fallback
+}
+
+func StartRecurrenceWorker(repo *postgresrepo.Repository) {
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		for range ticker.C {
+			ctx := context.Background() 
+			now := time.Now()
+
+			tasks, err := repo.List(ctx)
+			if err != nil {
+				continue
+			}
+
+			for _, t := range tasks {
+				if t.IsTemplate && t.Recurrence != nil && t.Recurrence.ShouldCreateToday(t.CreatedAt, now) {
+					
+					alreadyExists := false
+					for _, check := range tasks {
+						if check.ParentId != nil && *check.ParentId == t.ID && 
+						   check.CreatedAt.YearDay() == now.YearDay() && 
+						   check.CreatedAt.Year() == now.Year() {
+							alreadyExists = true
+							break
+						}
+					}
+
+					if alreadyExists {
+						continue
+					}
+
+					newTask := t
+					parentId := t.ID 
+					newTask.ID = 0
+					newTask.ParentId = &parentId
+					newTask.IsTemplate = false
+					newTask.Title = fmt.Sprintf("[%s] %s", now.Format("02.01"), t.Title)
+					newTask.CreatedAt = now
+					newTask.UpdatedAt = now
+
+					_, _ = repo.Create(ctx, &newTask)
+				}
+			}
+		}
+	}()
 }
